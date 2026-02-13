@@ -1,6 +1,6 @@
-﻿#pragma once
+#pragma once
+#include <Windows.h>
 #include <string>
-#include <fstream>
 
 struct Config {
     bool  camerHack       = true;
@@ -38,7 +38,7 @@ struct Config {
     int   menuAccent     = 0;
 
     bool  streamProof     = false;
-    int   menuKey         = VK_INSERT;
+    int   menuKey         = 0x2D; // VK_INSERT = 0x2D
 
     void Save(const std::string& path);
     void Load(const std::string& path);
