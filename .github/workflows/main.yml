@@ -1,0 +1,98 @@
+name: Build Dota 2 Cheat
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Configure CMake
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Build Debug
+        run: cmake --build build --config Debug --parallel
+
+      - name: List output files
+        run: |
+          echo "=== Release ==="
+          dir build\bin\Release\ 2>nul || echo "No Release output"
+          echo "=== Debug ==="
+          dir build\bin\Debug\ 2>nul || echo "No Debug output"
+          echo "=== Root bin ==="
+          dir build\bin\ 2>nul || echo "No bin output"
+
+      - name: Upload Release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dota2cheat-release
+          path: |
+            build/bin/Release/*.dll
+            build/bin/Release/*.exe
+          if-no-files-found: warn
+
+      - name: Upload Debug artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dota2cheat-debug
+          path: |
+            build/bin/Debug/*.dll
+            build/bin/Debug/*.exe
+            build/bin/Debug/*.pdb
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dota2cheat-release
+          path: release-files
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(echo ${{ github.sha }} | cut -c1-7)" >> $env:GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ steps.sha.outputs.short }}
+          name: Build ${{ steps.sha.outputs.short }}
+          body: |
+            Automated build from commit ${{ github.sha }}
+            
+            **Files:**
+            - `dota2minicheat.dll` — inject into dota2.exe
+            - `injector.exe` — auto-injector
+            
+            **Controls:**
+            - INSERT = toggle menu
+            - END = unload
+          files: release-files/*
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
