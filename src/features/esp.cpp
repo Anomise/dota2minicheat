@@ -1,172 +1,174 @@
-#include "awareness.h"
+#include "esp.h"
 #include "../sdk/interfaces.h"
 #include "../config.h"
 #include "../render/renderer.h"
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
-namespace Awareness {
+namespace ESP {
 
-    static bool IsVMValid(const Matrix4x4& vm) {
+    static ImU32 HPCol(float p) {
+        if (p > 0.6f) return IM_COL32(
+            (int)Math::Lerp(230, 80, (p - 0.6f) / 0.4f),
+            (int)Math::Lerp(200, 220, (p - 0.6f) / 0.4f),
+            (int)Math::Lerp(50, 80, (p - 0.6f) / 0.4f), 255);
+        if (p > 0.3f) return IM_COL32(230, (int)Math::Lerp(100, 200, (p - 0.3f) / 0.3f), 50, 255);
+        return IM_COL32(230, 60, 60, 255);
+    }
+
+    static std::string CleanName(const std::string& r) {
+        std::string n = r;
+        const char* px[] = {"npc_dota_hero_", "C_DOTA_Unit_Hero_", "CDOTA_Unit_Hero_"};
+        for (auto p : px) {
+            auto i = n.find(p);
+            if (i != std::string::npos) { n = n.substr(i + strlen(p)); break; }
+        }
+        for (size_t i = 0; i < n.size(); i++) {
+            if (n[i] == '_') n[i] = ' ';
+            if (i == 0 || (i > 0 && n[i - 1] == ' ')) n[i] = toupper(n[i]);
+        }
+        return n;
+    }
+
+    static bool IsViewMatrixValid(const Matrix4x4& vm) {
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
                 if (vm.m[i][j] != 0.f) return true;
         return false;
     }
 
-    static void WCircle(const Vector3& c, float r, ImU32 col,
-                        const Matrix4x4& vm, int seg = 64, float th = 2) {
-        Vector2 prev; bool pv = false;
-        for (int i = 0; i <= seg; i++) {
-            float a = (float)i / seg * 6.2831853f;
-            Vector3 wp(c.x + cosf(a) * r, c.y + sinf(a) * r, c.z);
-            Vector2 sp;
-            bool v = Math::WorldToScreen(wp, sp, vm, G::screenWidth, G::screenHeight);
-            if (v && pv) Renderer::DrawLine(prev.x, prev.y, sp.x, sp.y, col, th);
-            prev = sp; pv = v;
+    static void DrawHero(const HeroData& h, const Matrix4x4& vm) {
+        auto& c = Config::Get();
+
+        Vector2 sp;
+        if (!Math::WorldToScreen(h.pos, sp, vm, G::screenWidth, G::screenHeight))
+            return;
+
+        if (sp.x < -100 || sp.x > G::screenWidth + 100 ||
+            sp.y < -100 || sp.y > G::screenHeight + 100)
+            return;
+
+        float x = sp.x, y = sp.y;
+
+        // Illusion
+        if (c.espIllusions && h.illusion) {
+            static float pt = 0; pt += ImGui::GetIO().DeltaTime;
+            float pa = (sinf(pt * 5) + 1) * 0.5f;
+            Renderer::DrawText(x, y - 55, IM_COL32(255, 165, 0, (int)(pa * 180 + 75)),
+                "ILLUSION", c.espFontSize, true);
+            Renderer::DrawCircle(x, y, 28 + pa * 5, IM_COL32(255, 165, 0, (int)(pa * 150)), 32, 2);
+        }
+
+        // Status
+        if (h.stunned) Renderer::DrawText(x, y - 42, IM_COL32(255, 255, 50, 255), "[STUN]", c.espFontSize, true);
+        else if (h.hexed) Renderer::DrawText(x, y - 42, IM_COL32(200, 100, 255, 255), "[HEX]", c.espFontSize, true);
+        else if (h.silenced) Renderer::DrawText(x, y - 42, IM_COL32(80, 180, 255, 255), "[SIL]", c.espFontSize, true);
+        else if (h.rooted) Renderer::DrawText(x, y - 42, IM_COL32(100, 255, 100, 255), "[ROOT]", c.espFontSize, true);
+
+        if (h.magicImmune) Renderer::DrawCircle(x, y, 30, IM_COL32(200, 170, 50, 150), 32, 2.5f);
+
+        // Name
+        if (c.espNames) {
+            char nl[128];
+            snprintf(nl, 128, "%s [%d] %s", CleanName(h.name).c_str(), h.level, h.primaryAttr.c_str());
+            ImU32 nc = h.illusion ? IM_COL32(255, 165, 0, 255) :
+                (h.team == 2 ? IM_COL32(100, 220, 100, 255) : IM_COL32(220, 100, 100, 255));
+            Renderer::DrawText(x, y - 30, nc, nl, c.espFontSize, true);
+        }
+
+        // Health
+        if (c.espHealth && h.maxHP > 0) {
+            float hp = (float)h.health / h.maxHP;
+            Renderer::DrawProgressBar(x - 32, y - 16, 64, 7, hp, HPCol(hp), IM_COL32(20, 20, 25, 200));
+            char ht[32]; snprintf(ht, 32, "%d/%d", h.health, h.maxHP);
+            Renderer::DrawText(x, y - 17, IM_COL32(255, 255, 255, 200), ht, 10, true);
+        }
+
+        // Mana
+        if (c.espMana && h.maxMana > 0)
+            Renderer::DrawProgressBar(x - 32, y - 7, 64, 4,
+                h.mana / h.maxMana, IM_COL32(70, 130, 230, 255), IM_COL32(20, 20, 40, 200));
+
+        // Abilities
+        if (c.espSpellTracker && !h.abilities.empty()) {
+            std::vector<const AbilityInfo*> da;
+            for (auto& a : h.abilities) {
+                if (a.isHidden && a.level == 0) continue;
+                if (!a.isActivated && a.level == 0) continue;
+                da.push_back(&a);
+                if (da.size() >= 7) break;
+            }
+            if (!da.empty()) {
+                float bs = 18, s2 = 3;
+                float tw = da.size() * (bs + s2) - s2;
+                float sx = x - tw * 0.5f, sy = y + 6;
+                for (size_t i = 0; i < da.size(); i++) {
+                    float bx = sx + i * (bs + s2);
+                    auto& a = *da[i];
+                    if (a.level == 0) {
+                        Renderer::DrawFilledRect(bx, sy, bs, bs, IM_COL32(35, 35, 40, 200));
+                    } else if (a.isOnCooldown()) {
+                        Renderer::DrawFilledRect(bx, sy, bs, bs, IM_COL32(35, 35, 40, 220));
+                        float cp = 1 - a.getCooldownPercent(), fh = bs * cp;
+                        Renderer::DrawFilledRect(bx, sy + bs - fh, bs, fh, IM_COL32(120, 30, 30, 220));
+                        char ct[8]; snprintf(ct, 8, a.cooldown >= 10 ? "%.0f" : "%.1f", a.cooldown);
+                        Renderer::DrawText(bx + bs * 0.5f, sy + 3, IM_COL32(255, 120, 120, 255), ct, 9, true);
+                    } else {
+                        Renderer::DrawFilledRect(bx, sy, bs, bs, IM_COL32(30, 120, 60, 220));
+                    }
+                    Renderer::DrawRect(bx, sy, bs, bs,
+                        a.isUltimate ? IM_COL32(220, 180, 50, 255) : IM_COL32(70, 70, 80, 255), 1);
+                }
+            }
+        }
+
+        // Items
+        if (c.espItems && !h.items.empty()) {
+            float iw = 22, ih = 14, is = 2;
+            int dc = 0;
+            for (auto& it : h.items) if (it.slot >= 0 && it.slot <= 5) dc++;
+            if (dc > 0) {
+                float tw = dc * (iw + is) - is;
+                float sx = x - tw * 0.5f, sy = y + 35;
+                int dr = 0;
+                for (auto& it : h.items) {
+                    if (it.slot < 0 || it.slot > 5) continue;
+                    float ix = sx + dr * (iw + is);
+                    Renderer::DrawFilledRect(ix, sy, iw, ih,
+                        it.isOnCooldown() ? IM_COL32(60, 30, 30, 200) : IM_COL32(40, 50, 70, 200));
+                    Renderer::DrawRect(ix, sy, iw, ih, IM_COL32(80, 80, 100, 200), 1);
+                    std::string sn = it.name;
+                    auto p = sn.find("item_");
+                    if (p != std::string::npos) sn = sn.substr(p + 5, 3);
+                    else if (sn.size() > 3) sn = sn.substr(0, 3);
+                    Renderer::DrawText(ix + iw * 0.5f, sy + 1, IM_COL32(200, 200, 210, 220), sn.c_str(), 8, true);
+                    dr++;
+                }
+            }
         }
     }
 
     void OnFrame() {
-        auto& cfg = Config::Get();
-        if (!cfg.awarenessEnabled || !SDK::IsInGame()) return;
+        auto& c = Config::Get();
+        if (!c.espEnabled || !SDK::IsInGame()) return;
 
         auto vm = SDK::GetViewMatrix();
-        if (!IsVMValid(vm)) return;
+        if (!IsViewMatrixValid(vm)) return;
 
         auto lh = SDK::GetLocalHero();
-        if (!lh || !lh->IsAlive()) return;
+        if (!lh) return;
 
-        auto hp = lh->GetPosition();
-        auto npc = reinterpret_cast<C_DOTA_BaseNPC*>(lh);
+        uint8_t localTeam = lh->GetTeam();
 
-        // Attack range
-        if (cfg.attackRange) {
-            int r = npc->GetAttackRange();
-            if (r > 0 && r < 9999)
-                WCircle(hp, (float)r, IM_COL32(255, 255, 255, 60), vm, 64, 1.5f);
-        }
+        std::vector<HeroData> heroes;
+        SDK::CollectHeroes(heroes);
 
-        // Blink range
-        if (cfg.blinkRange) {
-            bool has = false;
-            for (int s = 0; s < 6; s++) {
-                auto h = npc->GetItemHandle(s);
-                if (h == 0xFFFFFFFF || h == 0) continue;
-                auto e = SDK::GetEntityFromHandle(h);
-                if (!e) continue;
-                auto n = e->GetClassName();
-                if (n && (strstr(n, "blink") || strstr(n, "Blink"))) {
-                    has = true; break;
-                }
-            }
-            if (has) WCircle(hp, 1200, IM_COL32(100, 180, 255, 80), vm, 48, 1.5f);
-        }
-
-        // XP range
-        if (cfg.expRange) {
-            ImU32 xc = ImGui::ColorConvertFloat4ToU32(ImVec4(
-                cfg.expRangeColor[0], cfg.expRangeColor[1],
-                cfg.expRangeColor[2], cfg.expRangeColor[3]));
-            WCircle(hp, 1500, xc, vm, 48, 1);
-        }
-
-        // Tower range
-        if (cfg.towerRange) {
-            ImU32 tc = ImGui::ColorConvertFloat4ToU32(ImVec4(
-                cfg.towerRangeColor[0], cfg.towerRangeColor[1],
-                cfg.towerRangeColor[2], cfg.towerRangeColor[3]));
-            int mx = SDK::GetMaxEntities();
-            if (mx <= 0) mx = 512;
-            mx = (std::min)(mx, 512);
-            uint8_t lt = lh->GetTeam();
-            for (int i = 0; i < mx; i++) {
-                auto e = SDK::GetEntityByIndex(i);
-                if (!e || !e->IsAlive()) continue;
-                auto n = e->GetClassName();
-                if (!n || !strstr(n, "Tower")) continue;
-                if (e->GetTeam() == lt) continue;
-                auto tp = e->GetPosition();
-                float d = hp.Distance2D(tp);
-                if (d < 3500) {
-                    WCircle(tp, 700, tc, vm, 48, 2.5f);
-                    if (d < 700) {
-                        static float wp2 = 0; wp2 += ImGui::GetIO().DeltaTime;
-                        int al = (int)((sinf(wp2 * 6) + 1) * 0.5f * 200 + 55);
-                        Renderer::DrawRect(0, 0, G::screenWidth, G::screenHeight,
-                            IM_COL32(255, 30, 30, al / 4), 4);
-                        Vector2 hs;
-                        if (Math::WorldToScreen(hp, hs, vm, G::screenWidth, G::screenHeight))
-                            Renderer::DrawText(hs.x, hs.y - 70, IM_COL32(255, 50, 50, al),
-                                "! TOWER !", 18, true);
-                    }
-                }
-            }
-        }
-
-        // Danger indicator
-        if (cfg.dangerIndicator) {
-            std::vector<HeroData> heroes;
-            SDK::CollectHeroes(heroes);
-            uint8_t lt = lh->GetTeam();
-            for (auto& en : heroes) {
-                if (en.team == lt || !en.alive) continue;
-                float d = hp.Distance2D(en.pos);
-                if (d > 3000 || d < 50) continue;
-                Vector2 sp;
-                if (!Math::WorldToScreen(en.pos, sp, vm, G::screenWidth, G::screenHeight)) {
-                    Vector3 dir = en.pos - hp;
-                    float a = atan2f(dir.y, dir.x);
-                    float ex = G::screenWidth * 0.5f + cosf(a) * G::screenWidth * 0.45f;
-                    float ey = G::screenHeight * 0.5f - sinf(a) * G::screenHeight * 0.45f;
-                    ex = Math::Clamp(ex, 50.f, G::screenWidth - 50);
-                    ey = Math::Clamp(ey, 50.f, G::screenHeight - 50);
-                    float da = Math::Clamp(1 - d / 3000.f, 0.2f, 1.f);
-                    Renderer::DrawFilledCircle(ex, ey, 8 + da * 5,
-                        IM_COL32(255, 60, 60, (int)(da * 255)));
-                }
-            }
-        }
-
-        // Last hit helper
-        if (cfg.lastHitHelper) {
-            int mx = SDK::GetMaxEntities();
-            if (mx <= 0) mx = 512;
-            mx = (std::min)(mx, 512);
-            uint8_t lt = lh->GetTeam();
-            auto hero = reinterpret_cast<C_DOTA_BaseNPC_Hero*>(lh);
-            float dmg = 50;
-            int pa = hero->GetPrimaryAttribute();
-            switch (pa) {
-                case 0: dmg += hero->GetStrengthTotal(); break;
-                case 1: dmg += hero->GetAgilityTotal(); break;
-                case 2: dmg += hero->GetIntellectTotal(); break;
-                default: dmg += (hero->GetStrengthTotal() +
-                    hero->GetAgilityTotal() + hero->GetIntellectTotal()) * 0.7f;
-            }
-            float ar = (float)npc->GetAttackRange();
-            for (int i = 0; i < mx; i++) {
-                auto e = SDK::GetEntityByIndex(i);
-                if (!e || !e->IsAlive()) continue;
-                auto cn = e->GetClassName();
-                if (!cn || !strstr(cn, "Creep")) continue;
-                if (e->GetTeam() == lt) continue;
-                auto cp = e->GetPosition();
-                if (hp.Distance2D(cp) > ar + 400) continue;
-                int chp = e->GetHealth();
-                if (chp <= 0) continue;
-                if ((float)chp <= dmg) {
-                    Vector2 sp;
-                    if (Math::WorldToScreen(cp, sp, vm, G::screenWidth, G::screenHeight)) {
-                        float pulse = (sinf(GetTickCount64() / 200.f) + 1) * 0.5f;
-                        Renderer::DrawCircle(sp.x, sp.y, 15,
-                            IM_COL32(50, 255, 50, (int)(pulse * 130 + 125)), 16, 2.5f);
-                        char ht[16]; snprintf(ht, 16, "%d", chp);
-                        Renderer::DrawText(sp.x, sp.y - 10,
-                            IM_COL32(50, 255, 50, (int)(pulse * 130 + 125)), ht, 12, true);
-                    }
-                }
-            }
+        for (auto& h : heroes) {
+            if (h.team == localTeam && !h.illusion) continue;
+            if (!h.alive) continue;
+            DrawHero(h, vm);
         }
     }
-}
+
+} // namespace ESP
