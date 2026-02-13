@@ -1,2 +1,5 @@
-﻿#pragma once
-namespace Awareness { void OnFrame(); }
+#pragma once
+
+namespace Awareness {
+    void OnFrame();
+}
