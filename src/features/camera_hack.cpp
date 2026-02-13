@@ -1,54 +1,83 @@
-﻿#include "camera_hack.h"
+#include "camera_hack.h"
 #include "../sdk/interfaces.h"
 #include "../config.h"
 #include "../utils/memory.h"
 #include <cmath>
 
 namespace CameraHack {
-    static float origDist = 1200.f, origFOV = 0.f;
-    static bool init = false, wasOn = false;
+    static bool wasEnabled = false;
+    static float originalZoom = 0.f;
+    static bool savedOriginal = false;
 
     void Initialize() {
-        if (SDK::pCameraInstance) {
-            origDist = Memory::Read<float>(SDK::pCameraInstance + Offsets::Camera::Distance);
-            origFOV  = Memory::Read<float>(SDK::pCameraInstance + Offsets::Camera::FOV);
-            init = true;
-        }
+        // Nothing needed - we use PlayerController
     }
 
     void OnFrame() {
         auto& c = Config::Get();
-        if (!c.camerHack) { if (wasOn) { Restore(); wasOn = false; } return; }
-        wasOn = true;
 
-        if (SDK::pCameraInstance) {
-            float cur = Memory::Read<float>(SDK::pCameraInstance + Offsets::Camera::Distance);
-            if (std::abs(cur - c.cameraDistance) > 0.5f)
-                Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::Distance, c.cameraDistance);
-            if (c.cameraFOV != 0.f)
-                Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::FOV, c.cameraFOV);
-            if (c.cameraFog) {
-                Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::FogEnd, 99999.f);
-                Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::FogStart, 99999.f);
+        if (!c.camerHack) {
+            if (wasEnabled) {
+                Restore();
+                wasEnabled = false;
+            }
+            return;
+        }
+
+        if (!SDK::IsInGame()) return;
+
+        wasEnabled = true;
+
+        // ==========================================
+        // Method 1: PlayerController CameraZoom
+        // This is the most reliable method
+        // CameraZoom is an offset from default (1134)
+        // ==========================================
+        auto ctrl = SDK::GetLocalPlayerController();
+        if (ctrl && ctrl->IsValid()) {
+            if (!savedOriginal) {
+                originalZoom = ctrl->GetCameraZoom();
+                savedOriginal = true;
+            }
+
+            float desiredOffset = c.cameraDistance - 1134.f;
+            float currentZoom = ctrl->GetCameraZoom();
+
+            if (std::abs(currentZoom - desiredOffset) > 1.f) {
+                ctrl->SetCameraZoom(desiredOffset);
             }
         }
 
-        auto ctrl = SDK::GetLocalPlayerController();
-        if (ctrl) {
-            float desired = c.cameraDistance - 1134.f;
-            if (std::abs(ctrl->GetCameraZoom() - desired) > 1.f)
-                ctrl->SetCameraZoom(desired);
+        // ==========================================
+        // Method 2: Direct camera instance (if found)
+        // ==========================================
+        if (SDK::pCameraInstance) {
+            auto currentDist = Memory::Read<float>(SDK::pCameraInstance);
+            if (currentDist > 100.f && currentDist < 10000.f) {
+                if (std::abs(currentDist - c.cameraDistance) > 1.f) {
+                    Memory::Write<float>(SDK::pCameraInstance, c.cameraDistance);
+                }
+            }
         }
+
+        // ==========================================
+        // Method 3: ConVar "dota_camera_distance"
+        // Try writing to the ConVar value directly
+        // ==========================================
+        // If pCameraInstance points to convar value:
+        // Just write desired distance there
     }
 
     void Restore() {
-        if (SDK::pCameraInstance && init) {
-            Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::Distance, origDist);
-            Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::FOV, origFOV);
-            Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::FogEnd, 5000.f);
-            Memory::Write<float>(SDK::pCameraInstance + Offsets::Camera::FogStart, 3000.f);
-        }
         auto ctrl = SDK::GetLocalPlayerController();
-        if (ctrl) ctrl->SetCameraZoom(0.f);
+        if (ctrl && ctrl->IsValid() && savedOriginal) {
+            ctrl->SetCameraZoom(originalZoom);
+        }
+
+        if (SDK::pCameraInstance) {
+            Memory::Write<float>(SDK::pCameraInstance, 1200.f);
+        }
+
+        savedOriginal = false;
     }
 }
