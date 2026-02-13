@@ -1,2 +1,5 @@
-﻿#pragma once
-namespace ESP { void OnFrame(); }
+#pragma once
+
+namespace ESP {
+    void OnFrame();
+}
