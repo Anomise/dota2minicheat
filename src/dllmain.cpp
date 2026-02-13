@@ -1,42 +1,39 @@
 #include "globals.h"
 #include "hooks/hooks.h"
 #include "config.h"
+#include "utils/logger.h"
 
 static void MainThread(HMODULE hModule) {
-    // Always allocate console for debugging
     AllocConsole();
     FILE* f = nullptr;
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
 
-    printf("=================================\n");
-    printf("  Dota 2 Cheat v2.0 Loaded\n");
-    printf("=================================\n");
+    LOG_INFO("=================================");
+    LOG_INFO("  Dota 2 Cheat v2.0 Loaded");
+    LOG_INFO("=================================");
 
     Config::Get().Load("dota2cheat.cfg");
+    LOG_INFO("Config loaded");
 
-    printf("[*] Waiting before hook init...\n");
+    LOG_INFO("Waiting 3s before hook init...");
     Sleep(3000);
 
-    printf("[*] Initializing hooks...\n");
+    LOG_INFO("Initializing hooks...");
     if (!Hooks::Initialize()) {
-        printf("[-] Hook initialization FAILED!\n");
-        printf("[*] Press any key to unload...\n");
+        LOG_ERROR("Hook initialization FAILED!");
+        LOG_INFO("Unloading in 5s...");
         Sleep(5000);
         FreeLibraryAndExitThread(hModule, 0);
         return;
     }
 
-    printf("[+] Hooks initialized OK!\n");
-    printf("[+] INSERT = toggle menu\n");
-    printf("[+] END = unload\n");
-    printf("[*] Waiting for game...\n");
+    LOG_SUCCESS("Hooks initialized!");
+    LOG_INFO("INSERT = toggle menu | END = unload");
 
-    while (!G::bShouldUnload) {
-        Sleep(100);
-    }
+    while (!G::bShouldUnload) Sleep(100);
 
-    printf("[*] Unloading...\n");
+    LOG_INFO("Unloading...");
     Config::Get().Save("dota2cheat.cfg");
     Hooks::Shutdown();
     Sleep(1000);
